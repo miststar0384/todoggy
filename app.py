@@ -1,50 +1,54 @@
-from flask import Flask, request, jsonify
-import requests
-import schedule
-import time
-import threading
+from flask import Flask, request, abort
+from linebot import (
+    LineBotApi, WebhookHandler
+)
+from linebot.exceptions import (
+    InvalidSignatureError
+)
+from linebot.models import *
+import os
+import datetime
 
 app = Flask(__name__)
-channel_access_token = 'sCIp24H+cQ/Swy9T92tPrziaIvWLYqaTMrtJ+rnPEZI2osz/o4xtSM2aymVf6tWiFWWuBAAGbcuwAG/yB4Nv5cL36thJQTokFM5bVOpQAHQQWawXybZVE/otQxGx1s7WFUR70xu0dXaCEfGApn8jMwdB04t89/1O/w1cDnyilFU='
+static_tmp_path = os.path.join(os.path.dirname(__file__), 'static', 'tmp')
 
-todos = {}
-remind_time = {}
+line_bot_api = LineBotApi(os.getenv('CHANNEL_ACCESS_TOKEN'))
+handler = WebhookHandler(os.getenv('CHANNEL_SECRET'))
 
-def send_message(to, message):
-    headers = {
-        'Content-Type': 'application/json',
-        'Authorization': f'Bearer {channel_access_token}'
-    }
-    data = {
-        'to': to,
-        'messages': [{
-            'type': 'text',
-            'text': message
-        }]
-    }
-    requests.post('https://api.line.me/v2/bot/message/push', headers=headers, json=data)
+# 使用字典儲存每天的待辦事項，key是日期，value是待辦事項列表
+todo_list = {}
 
-def check_todos():
-    while True:
-        schedule.run_pending()
-        time.sleep(1)
+@app.route("/callback", methods=['POST'])
+def callback():
+    signature = request.headers['X-Line-Signature']
+    body = request.get_data(as_text=True)
+    app.logger.info("Request body: " + body)
+    try:
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        abort(400)
+    return 'OK'
 
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    body = request.json
-    events = body['events']
-    for event in events:
-        user_id = event['source']['userId']
-        text = event['message']['text']
-        if text.startswith('今天的待辦事項'):
-            todos[user_id] = text[7:]
-            send_message(user_id, '已保存今天的待辦事項！')
-        elif text.startswith('設定檢查時間'):
-            time_str = text[6:]
-            schedule.every().day.at(time_str).do(send_message, user_id, f'今日待辦事項：{todos.get(user_id, "未設置")}')
-            send_message(user_id, f'已設定檢查時間為 {time_str}!')
-    return jsonify({'status': 'success'})
+@handler.add(MessageEvent, message=TextMessage)
+def handle_message(event):
+    user_id = event.source.user_id
+    msg = event.message.text
+    if "我今天要做的事情：" in msg:
+        # 切割訊息，取得日期和待辦事項
+        _, date, tasks = msg.split("：", 2)
+        date = date.strip()
+        tasks = tasks.strip().split("、")
+        todo_list[date] = tasks
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(f"已記錄{date}的待辦事項：{tasks}"))
+    elif "查看今天完成了什麼事情" in msg:
+        today = datetime.date.today().strftime("%Y-%m-%d")
+        tasks_done = todo_list.get(today, [])
+        if tasks_done:
+            reply_msg = f"今天已完成的待辦事項：{tasks_done}"
+        else:
+            reply_msg = "今天還沒有完成任何待辦事項哦！"
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(reply_msg))
 
-if __name__ == '__main__':
-    threading.Thread(target=check_todos).start()
-    app.run(port=5000)
+if __name__ == "__main__":
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
